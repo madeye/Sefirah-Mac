@@ -413,3 +413,17 @@ solution-config.props
 *.code-workspace
 /src/.vscode
 /src/.vsconfig
+/legacy/src/.vscode
+/legacy/src/.vsconfig
+
+# Xcode / Swift
+build/
+DerivedData/
+*.xcresult
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+.swiftpm/
+.build/
+*.DS_Store
+.DS_Store
