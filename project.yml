@@ -1,0 +1,100 @@
+# Generate with: xcodegen generate
+name: Sefirah
+options:
+  minimumXcodeGenVersion: 2.42.0
+  deploymentTarget:
+    macOS: "14.0"
+  bundleIdPrefix: io.github.madeye
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: 7.4.0
+  swift-certificates:
+    url: https://github.com/apple/swift-certificates.git
+    from: 1.7.0
+configs:
+  Debug: debug
+  Release: release
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    MACOSX_DEPLOYMENT_TARGET: 14.0
+    SWIFT_EMIT_LOC_STRINGS: YES
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: 1
+  configs:
+    Release:
+      CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+      ENABLE_HARDENED_RUNTIME: YES
+targets:
+  SefirahCore:
+    type: framework
+    platform: macOS
+    sources:
+      - SefirahCore
+    dependencies:
+      - package: GRDB
+        product: GRDB
+      - package: swift-certificates
+        product: X509
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.madeye.sefirah.mac.core
+        DEFINES_MODULE: YES
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+  Sefirah:
+    type: application
+    platform: macOS
+    sources:
+      - Sefirah
+    dependencies:
+      - target: SefirahCore
+    info:
+      path: Sefirah/Info.plist
+      properties:
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleDisplayName: Sefirah
+        CFBundleName: Sefirah
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        LSApplicationCategoryType: public.app-category.utilities
+        ITSAppUsesNonExemptEncryption: false
+        NSPrincipalClass: NSApplication
+        NSLocalNetworkUsageDescription: Sefirah discovers and connects to your Android phone on the local network.
+        NSBonjourServices:
+          - _sefirah._udp
+        CFBundleURLTypes:
+          - CFBundleURLName: io.github.madeye.sefirah.mac
+            CFBundleTypeRole: Editor
+            CFBundleURLSchemes:
+              - sefirah
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.madeye.sefirah.mac
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+        COMBINE_HIDPI_IMAGES: YES
+  SefirahCoreTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - SefirahCoreTests
+    dependencies:
+      - target: SefirahCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.madeye.sefirah.mac.core.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Sefirah:
+    build:
+      targets:
+        Sefirah: all
+        SefirahCore: all
+        SefirahCoreTests: [test]
+    test:
+      targets:
+        - SefirahCoreTests

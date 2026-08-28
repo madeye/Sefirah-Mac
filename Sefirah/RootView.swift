@@ -1,0 +1,36 @@
+import SwiftUI
+
+struct RootView: View {
+    @Bindable var model: AppModel
+    @Environment(\.openWindow) private var openWindow
+    @State private var showWelcomeContinue = false
+
+    var body: some View {
+        Group {
+            if !model.hasCompletedOnboarding {
+                if showWelcomeContinue {
+                    SyncView(model: model, onSkip: { model.completeOnboarding() })
+                } else {
+                    WelcomeView { showWelcomeContinue = true }
+                }
+            } else {
+                MainSplitView(model: model)
+            }
+        }
+        .sheet(item: Binding(
+            get: { model.pendingPairing },
+            set: { if $0 == nil { model.declinePendingPair() } }
+        )) { peer in
+            PairingDialog(
+                peer: peer,
+                onAccept: { model.acceptPendingPair() },
+                onDecline: { model.declinePendingPair() }
+            )
+        }
+        .onChange(of: model.incomingCall) { _, call in
+            if call != nil {
+                openWindow(id: "call")
+            }
+        }
+    }
+}
