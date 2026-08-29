@@ -27,6 +27,12 @@ struct RootView: View {
                 onDecline: { model.declinePendingPair() }
             )
         }
+        .alert(item: $model.toolFailure) { failure in
+            Alert(
+                title: Text(failure.title),
+                message: Text(failure.detail.map { "\(failure.message)\n\n\($0)" } ?? failure.message)
+            )
+        }
         .onChange(of: model.incomingCall) { _, call in
             if call != nil {
                 openWindow(id: "call")

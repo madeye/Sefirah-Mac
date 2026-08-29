@@ -427,3 +427,8 @@ xcuserdata/
 .build/
 *.DS_Store
 .DS_Store
+
+# Vendored scrcpy (populated by scripts/fetch-scrcpy.sh)
+Vendor/scrcpy/*
+!Vendor/scrcpy/README.md
+!Vendor/scrcpy/NOTICES.md

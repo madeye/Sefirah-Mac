@@ -24,6 +24,7 @@ struct AppsView: View {
                         Text(app.appName)
                         Spacer()
                         Button("Launch") { model.launchScrcpy(package: app.packageName, appName: app.appName) }
+                            .disabled(model.selectedDevice.map { model.isMirrorPending("\($0.id):\(app.packageName)") } ?? true)
                     }
                 }
             }
