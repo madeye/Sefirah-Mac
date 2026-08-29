@@ -1,3 +1,4 @@
+import AppKit
 import SefirahCore
 import SwiftUI
 
@@ -19,10 +20,33 @@ struct SettingsView: View {
                     Text("Disabled").tag(StartupOptions.disabled)
                 }
                 TextField("Device name", text: $model.general.localDeviceName)
-                TextField("scrcpy path", text: $model.general.scrcpyPath)
-                TextField("adb path", text: $model.general.adbPath)
                 TextField("Received files", text: $model.general.receivedFilesPath)
                 Button("Save") { model.saveGeneral() }
+            }
+            Section("Screen mirroring") {
+                LabeledContent("Bundled scrcpy", value: model.bundledScrcpyVersion.map { "v\($0)" } ?? "Not found — reinstall Sefirah")
+                if let device = model.selectedDevice {
+                    Toggle("Connect over Wi-Fi (ADB TCP/IP)", isOn: adbTcpipBinding(for: device.id))
+                }
+                DisclosureGroup("Advanced") {
+                    HStack {
+                        TextField("Custom scrcpy path", text: $model.general.scrcpyPath)
+                        Button("Choose…") { choosePath { model.general.scrcpyPath = $0; model.saveGeneral() } }
+                    }
+                    HStack {
+                        TextField("Custom adb path", text: $model.general.adbPath)
+                        Button("Choose…") { choosePath { model.general.adbPath = $0; model.saveGeneral() } }
+                    }
+                    Text("Leave empty to use the bundled copies. A custom scrcpy uses its own scrcpy-server.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Save paths") { model.saveGeneral() }
+                    HStack {
+                        Button("Restart ADB server") { model.restartAdbServer() }
+                        if let result = model.adbRestartResult {
+                            Text(result).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
             }
             Section("Devices") {
                 ForEach(model.paired) { device in
@@ -59,9 +83,29 @@ struct SettingsView: View {
                 LabeledContent("Ports", value: "UDP 5149, TLS 5150–5169")
                 Link("Sefirah on GitHub", destination: URL(string: "https://github.com/shrimqy/Sefirah")!)
                 Link("Android app", destination: URL(string: "https://github.com/shrimqy/Sefirah-Android")!)
+                Button("Third-party notices") { model.openThirdPartyNotices() }
+                    .buttonStyle(.link)
             }
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private func adbTcpipBinding(for deviceId: String) -> Binding<Bool> {
+        Binding(
+            get: { model.deviceSettings(for: deviceId).adbTcpipModeEnabled },
+            set: { value in model.updateDeviceSettings(for: deviceId) { $0.adbTcpipModeEnabled = value } }
+        )
+    }
+
+    private func choosePath(_ apply: (String) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        if panel.runModal() == .OK, let url = panel.url {
+            apply(url.path)
+        }
     }
 }

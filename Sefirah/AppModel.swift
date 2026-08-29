@@ -26,6 +26,14 @@ final class AppModel: PairingDecider {
     var serverPort: Int?
     var incomingCall: CallInfo?
     var showMainWindow = true
+    /// Drives the single tool-failure alert in RootView.
+    var toolFailure: ToolFailure?
+    /// Keys of running scrcpy sessions (device id, or "<device>:<package>").
+    var mirroringKeys: Set<String> = []
+    /// Keys whose launch is still in the adb phase (before scrcpy has spawned).
+    var pendingMirrorKeys: Set<String> = []
+    var bundledScrcpyVersion: String? { bundledTools?.version }
+    var adbRestartResult: String?
 
     private var pairingContinuation: CheckedContinuation<Bool, Never>?
     private(set) var session: SessionManager?
@@ -34,6 +42,10 @@ final class AppModel: PairingDecider {
     private let settings: SettingsStore
     private let identity: DeviceIdentity
     private let localDevice: LocalDeviceRecord
+    private let bundledTools = BundledTools.locate()
+    private let scrcpyRunner: any ScrcpyRunning = ScrcpyProcessRunner()
+    private let commandRunner: any CommandRunning = ProcessCommandRunner()
+    private var terminateObserver: NSObjectProtocol?
 
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
@@ -120,6 +132,11 @@ final class AppModel: PairingDecider {
         }) ?? []
         selectedDeviceID = paired.first?.id
         refreshDevice()
+
+        let runner = scrcpyRunner
+        terminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { _ in runner.terminateAll() }
     }
 
     var selectedDevice: ConnectedPeer? {
@@ -255,15 +272,170 @@ final class AppModel: PairingDecider {
     }
 
     func launchScrcpy(package: String? = nil, appName: String? = nil) {
-        guard let deviceID = selectedDeviceID else { return }
-        let deviceSettings = (try? settings.loadDevice(id: deviceID)) ?? DeviceSettings(deviceId: deviceID)
-        let path = general.scrcpyPath.isEmpty ? deviceSettings.scrcpyPath : general.scrcpyPath
-        guard !path.isEmpty else { return }
-        let args = ScrcpyArguments.build(settings: deviceSettings, serial: nil, package: package, appName: appName)
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = args
-        try? process.run()
+        Task { await launchScrcpyAsync(package: package, appName: appName) }
+    }
+
+    func launchScrcpyAsync(package: String? = nil, appName: String? = nil) async {
+        guard let device = selectedDevice else { return }
+        let key = package.map { "\(device.id):\($0)" } ?? device.id
+        // Ignore re-entrant launches while the adb phase is still running for this key.
+        guard !pendingMirrorKeys.contains(key) else { return }
+        pendingMirrorKeys.insert(key)
+        defer { pendingMirrorKeys.remove(key) }
+        let deviceSettings = (try? settings.loadDevice(id: device.id)) ?? DeviceSettings(deviceId: device.id)
+        let env = ProcessInfo.processInfo.environment
+        let home = NSHomeDirectory()
+        let general = self.general
+        let bundledTools = self.bundledTools
+        func makePlan(_ serial: String?) throws -> ScrcpyLaunchPlan {
+            try ScrcpyLaunchPlanner.plan(
+                general: general, device: deviceSettings, bundled: bundledTools,
+                serial: serial, package: package, appName: appName,
+                baseEnvironment: env, home: home,
+                isExecutable: { FileManager.default.isExecutableFile(atPath: $0.path) }
+            )
+        }
+
+        // Resolve tools first with serial nil so tool errors surface before any adb call.
+        let base: ScrcpyLaunchPlan
+        do {
+            base = try makePlan(nil)
+        } catch {
+            toolFailure = ToolFailure(
+                title: "Screen mirroring unavailable",
+                message: error.localizedDescription,
+                detail: "Bundled scrcpy: \(bundledScrcpyVersion ?? "missing")"
+            )
+            return
+        }
+
+        // Optional Wi-Fi connect + serial selection.
+        var serial: String?
+        if let adb = base.adb {
+            let client = AdbClient(adb: adb, environment: base.environment, runner: commandRunner)
+            if deviceSettings.adbTcpipModeEnabled {
+                do {
+                    serial = try await client.tryConnectTcp(host: device.address, model: device.model)
+                } catch {
+                    toolFailure = ToolFailure(
+                        title: "Could not reach \(device.name) over ADB",
+                        message: error.localizedDescription,
+                        detail: "Enable Wireless debugging, or connect once over USB so Sefirah can switch the phone to TCP/IP mode."
+                    )
+                    return
+                }
+            } else if let devices = try? await client.devices() {
+                serial = ScrcpyDeviceSelection.serial(
+                    devices: devices, peerModel: device.model, preference: deviceSettings.scrcpyDevicePreference
+                )
+            } // adb listing failures are non-fatal here; scrcpy reports its own error which we surface on exit.
+        }
+
+        let plan: ScrcpyLaunchPlan
+        if let serial, let withSerial = try? makePlan(serial) { plan = withSerial } else { plan = base }
+        do {
+            try scrcpyRunner.launch(plan, key: key) { [weak self] exit in
+                Task { @MainActor in self?.handleScrcpyExit(exit, key: key, plan: plan) }
+            }
+            mirroringKeys.insert(key)
+        } catch {
+            toolFailure = ToolFailure(title: "Could not start scrcpy", message: error.localizedDescription, detail: plan.executable.path)
+        }
+    }
+
+    private func handleScrcpyExit(_ exit: ScrcpyExit, key: String, plan: ScrcpyLaunchPlan) {
+        // A relaunch with the same key terminates the previous process; the runner already
+        // tracks the replacement, so this exit belongs to the old one and must not clear the key.
+        guard !scrcpyRunner.runningKeys.contains(key) else { return }
+        mirroringKeys.remove(key)
+        switch exit {
+        case .normal:
+            return
+        case .failure(let code, let stderr), .signaled(let code, let stderr):
+            toolFailure = ToolFailure(
+                title: "scrcpy exited (code \(code))",
+                message: ScrcpyDiagnostics.hint(exit: exit) ?? "scrcpy reported an error.",
+                detail: stderr.isEmpty ? plan.executable.path : stderr
+            )
+        }
+    }
+
+    func stopMirroring(key: String? = nil) {
+        if let key {
+            scrcpyRunner.terminate(key: key)
+        } else {
+            scrcpyRunner.terminateAll()
+        }
+    }
+
+    func isMirroring(_ deviceId: String) -> Bool {
+        mirroringKeys.contains(deviceId)
+    }
+
+    func isMirrorPending(_ key: String) -> Bool {
+        pendingMirrorKeys.contains(key)
+    }
+
+    /// True when Mirror can work: bundled tools present or a custom scrcpy path set.
+    var canMirror: Bool {
+        if bundledTools != nil { return true }
+        if !general.scrcpyPath.trimmingCharacters(in: .whitespaces).isEmpty { return true }
+        guard let id = selectedDeviceID else { return false }
+        return !deviceSettings(for: id).scrcpyPath.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// The adb the app would use for troubleshooting commands (override or bundled).
+    private var resolvedAdb: URL? {
+        let override = general.adbPath.trimmingCharacters(in: .whitespaces)
+        if !override.isEmpty { return URL(fileURLWithPath: override) }
+        return bundledTools?.adb
+    }
+
+    func restartAdbServer() {
+        guard let adb = resolvedAdb else {
+            adbRestartResult = "No adb available."
+            return
+        }
+        adbRestartResult = "Restarting…"
+        var env = ProcessInfo.processInfo.environment
+        if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
+        if env["PATH"] == nil { env["PATH"] = ScrcpyLaunchPlanner.defaultPath }
+        let runner = commandRunner
+        Task {
+            do {
+                _ = try await runner.run(adb, ["kill-server"], environment: env, timeout: 5)
+                let start = try await runner.run(adb, ["start-server"], environment: env, timeout: 10)
+                adbRestartResult = start.exitCode == 0
+                    ? "ADB server restarted."
+                    : "adb start-server failed (exit \(start.exitCode)): \(start.stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+            } catch {
+                adbRestartResult = error.localizedDescription
+            }
+        }
+    }
+
+    func openThirdPartyNotices() {
+        if let url = Bundle.main.resourceURL?.appendingPathComponent("scrcpy/NOTICES.md"),
+           FileManager.default.fileExists(atPath: url.path)
+        {
+            NSWorkspace.shared.open(url)
+        } else {
+            NSWorkspace.shared.open(URL(string: "https://github.com/Genymobile/scrcpy/blob/master/LICENSE")!)
+        }
+    }
+
+    func deviceSettings(for deviceId: String) -> DeviceSettings {
+        (try? settings.loadDevice(id: deviceId)) ?? DeviceSettings(deviceId: deviceId)
+    }
+
+    func updateDeviceSettings(for deviceId: String, _ mutate: (inout DeviceSettings) -> Void) {
+        var current = deviceSettings(for: deviceId)
+        mutate(&current)
+        do {
+            try settings.saveDevice(current)
+        } catch {
+            toolFailure = ToolFailure(title: "Could not save device settings", message: error.localizedDescription, detail: nil)
+        }
     }
 
     func runAction(_ item: ActionItem) {
@@ -279,7 +451,11 @@ final class AppModel: PairingDecider {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: plan.command)
         process.arguments = plan.arguments
-        try? process.run()
+        do {
+            try process.run()
+        } catch {
+            toolFailure = ToolFailure(title: "Could not run action", message: error.localizedDescription, detail: plan.command)
+        }
     }
 
     func openSftp() {
@@ -421,4 +597,9 @@ final class AppModel: PairingDecider {
 
 }
 
-
+struct ToolFailure: Identifiable, Equatable {
+    let id = UUID()
+    var title: String
+    var message: String
+    var detail: String?
+}

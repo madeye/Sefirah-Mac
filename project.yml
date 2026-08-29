@@ -49,6 +49,37 @@ targets:
     platform: macOS
     sources:
       - Sefirah
+      # Vendored scrcpy — populated by scripts/fetch-scrcpy.sh (run it before `xcodegen generate`;
+      # xcodegen fails on missing source paths). Mach-O helpers → Contents/MacOS as nested code,
+      # signed on copy with the app identity (+ hardened runtime in Release). Data → Resources/scrcpy.
+      - path: Vendor/scrcpy/scrcpy
+        buildPhase: { copyFiles: { destination: executables } }
+        attributes: [CodeSignOnCopy]
+      - path: Vendor/scrcpy/adb
+        buildPhase: { copyFiles: { destination: executables } }
+        attributes: [CodeSignOnCopy]
+      - path: Vendor/scrcpy/scrcpy-server
+        buildPhase: { copyFiles: { destination: resources, subpath: scrcpy } }
+      - path: Vendor/scrcpy/LICENSE
+        buildPhase: { copyFiles: { destination: resources, subpath: scrcpy } }
+      - path: Vendor/scrcpy/NOTICES.md
+        buildPhase: { copyFiles: { destination: resources, subpath: scrcpy } }
+      - path: Vendor/scrcpy/VERSION
+        buildPhase: { copyFiles: { destination: resources, subpath: scrcpy } }
+    preBuildScripts:
+      - name: Check vendored scrcpy
+        shell: /bin/bash
+        basedOnDependencyAnalysis: false
+        script: |
+          source "$SRCROOT/scripts/scrcpy.lock"
+          V="$SRCROOT/Vendor/scrcpy"
+          if [ ! -x "$V/scrcpy" ] || [ ! -x "$V/adb" ] || [ ! -f "$V/scrcpy-server" ]; then
+            echo "error: Vendor/scrcpy is missing — run scripts/fetch-scrcpy.sh" >&2; exit 1
+          fi
+          HAVE="$(cat "$V/VERSION" 2>/dev/null || echo none)"
+          if [ "$HAVE" != "$SCRCPY_VERSION" ]; then
+            echo "error: Vendor/scrcpy is v$HAVE but scripts/scrcpy.lock pins v$SCRCPY_VERSION — run scripts/fetch-scrcpy.sh" >&2; exit 1
+          fi
     dependencies:
       - target: SefirahCore
     info:
