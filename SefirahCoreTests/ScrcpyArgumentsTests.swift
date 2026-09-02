@@ -25,6 +25,19 @@ final class ScrcpyArgumentsTests: XCTestCase {
         XCTAssertEqual(args, ["-s", "ABC123"])
     }
 
+    func testCodecFlagsMatchNativeMapping() {
+        var s = settings()
+        s.videoCodec = 1
+        s.audioCodec = 1
+        XCTAssertEqual(ScrcpyArguments.build(settings: s, serial: nil), ["--video-codec=h265", "--audio-codec=aac"])
+        s.videoCodec = 2
+        s.audioCodec = 2
+        XCTAssertEqual(ScrcpyArguments.build(settings: s, serial: nil), ["--video-codec=av1", "--audio-codec=raw"])
+        s.videoCodec = 0
+        s.audioCodec = 0
+        XCTAssertEqual(ScrcpyArguments.build(settings: s, serial: nil), [])
+    }
+
     func testFlexDisplayWithPackage() {
         var s = settings()
         s.flexDisplay = true

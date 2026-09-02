@@ -32,6 +32,16 @@ public enum ScrcpyArguments {
         if let bitrate = nonempty(bitrate) {
             args.append("--video-bit-rate=\(bitrate)")
         }
+        switch settings.videoCodec {
+        case 1: args.append("--video-codec=h265")
+        case 2: args.append("--video-codec=av1")
+        default: break
+        }
+        switch settings.audioCodec {
+        case 1: args.append("--audio-codec=aac")
+        case 2: args.append("--audio-codec=raw")
+        default: break
+        }
         if settings.videoBuffer > 0 { args.append("--video-buffer=\(settings.videoBuffer)") }
         if settings.frameRate > 0 { args.append("--max-fps=\(settings.frameRate)") }
         if let crop = nonempty(settings.crop) { args.append("--crop=\(crop)") }

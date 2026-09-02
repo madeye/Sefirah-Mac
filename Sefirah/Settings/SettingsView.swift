@@ -25,9 +25,7 @@ struct SettingsView: View {
             }
             Section("Screen mirroring") {
                 LabeledContent("Bundled scrcpy", value: model.bundledScrcpyVersion.map { "v\($0)" } ?? "Not found — reinstall Sefirah")
-                if let device = model.selectedDevice {
-                    Toggle("Connect over Wi-Fi (ADB TCP/IP)", isOn: adbTcpipBinding(for: device.id))
-                }
+                MirrorSettingsView(model: model, deviceId: model.selectedDevice?.id)
                 DisclosureGroup("Advanced") {
                     HStack {
                         TextField("Custom scrcpy path", text: $model.general.scrcpyPath)
@@ -89,13 +87,6 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding()
-    }
-
-    private func adbTcpipBinding(for deviceId: String) -> Binding<Bool> {
-        Binding(
-            get: { model.deviceSettings(for: deviceId).adbTcpipModeEnabled },
-            set: { value in model.updateDeviceSettings(for: deviceId) { $0.adbTcpipModeEnabled = value } }
-        )
     }
 
     private func choosePath(_ apply: (String) -> Void) {

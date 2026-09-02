@@ -32,8 +32,11 @@ final class AppModel: PairingDecider {
     var mirroringKeys: Set<String> = []
     /// Keys whose launch is still in the adb phase (before scrcpy has spawned).
     var pendingMirrorKeys: Set<String> = []
-    var bundledScrcpyVersion: String? { bundledTools?.version }
+    var bundledScrcpyVersion: String? { bundledTools?.version ?? nativeTools?.version }
     var adbRestartResult: String?
+    var selectedTab: MainTab = .calls
+    /// Native mirror sessions keyed like `mirroringKeys`.
+    var mirrors: [String: MirrorController] = [:]
 
     private var pairingContinuation: CheckedContinuation<Bool, Never>?
     private(set) var session: SessionManager?
@@ -43,6 +46,7 @@ final class AppModel: PairingDecider {
     private let identity: DeviceIdentity
     private let localDevice: LocalDeviceRecord
     private let bundledTools = BundledTools.locate()
+    private let nativeTools = NativeTools.locate()
     private let scrcpyRunner: any ScrcpyRunning = ScrcpyProcessRunner()
     private let commandRunner: any CommandRunning = ProcessCommandRunner()
     private var terminateObserver: NSObjectProtocol?
@@ -136,7 +140,10 @@ final class AppModel: PairingDecider {
         let runner = scrcpyRunner
         terminateObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
-        ) { _ in runner.terminateAll() }
+        ) { [weak self] _ in
+            runner.terminateAll()
+            MainActor.assumeIsolated { self?.mirrors.values.forEach { $0.emergencyStop() } }
+        }
     }
 
     var selectedDevice: ConnectedPeer? {
@@ -368,16 +375,190 @@ final class AppModel: PairingDecider {
         }
     }
 
+    // MARK: - Native mirror
+
+    /// Dispatches to the native session or the external scrcpy window per `general.mirrorBackend`.
+    func startMirror(package: String? = nil, appName: String? = nil) {
+        if general.mirrorBackend == .external {
+            launchScrcpy(package: package, appName: appName)
+            return
+        }
+        Task { await startNativeMirrorAsync(package: package, appName: appName) }
+    }
+
+    func mirrorController(for key: String) -> MirrorController? {
+        mirrors[key]
+    }
+
+    /// Key of the session shown in the Mirror tab (set when a session starts or the user picks one).
+    var focusedMirrorKey: String?
+
+    /// Live (non-idle) native sessions of a device: the device mirror first, then per-app sessions by key.
+    func mirrorSessions(for deviceId: String) -> [MirrorController] {
+        mirrors.values
+            .filter { $0.deviceId == deviceId && $0.state != .idle }
+            .sorted { ($0.package == nil ? 0 : 1, $0.key) < ($1.package == nil ? 0 : 1, $1.key) }
+    }
+
+    /// The session the Mirror tab shows for the selected device: the focused one when live, else the first live session.
+    var displayedMirrorController: MirrorController? {
+        guard let id = selectedDeviceID else { return nil }
+        let sessions = mirrorSessions(for: id)
+        if let key = focusedMirrorKey, let focused = sessions.first(where: { $0.key == key }) { return focused }
+        return sessions.first
+    }
+
+    /// The streaming session of the selected device (the displayed one first, then any other streaming session).
+    var activeMirrorController: MirrorController? {
+        guard let id = selectedDeviceID else { return nil }
+        if let shown = displayedMirrorController, shown.state == .streaming { return shown }
+        return mirrorSessions(for: id).first { $0.state == .streaming }
+    }
+
+    /// - Parameter reusing: an existing (inactive) controller to restart in place — the automatic
+    ///   reconnect path, which must re-resolve the serial (`adb connect` after a Wi-Fi drop).
+    func startNativeMirrorAsync(package: String? = nil, appName: String? = nil, reusing: MirrorController? = nil) async {
+        guard let device = selectedDevice else { return }
+        let key = package.map { "\(device.id):\($0)" } ?? device.id
+        guard !pendingMirrorKeys.contains(key) else { return }
+        if let reusing, reusing.key != key { return }   // selection changed while reconnecting
+        if let existing = mirrors[key], existing.isActive { return }
+        pendingMirrorKeys.insert(key)
+        defer { pendingMirrorKeys.remove(key) }
+
+        let controller = reusing ?? MirrorController(key: key, deviceId: device.id, title: appName ?? device.name, package: package)
+        mirrors[key] = controller
+        if reusing == nil {
+            focusedMirrorKey = key
+            selectedTab = .mirror
+        }
+
+        let deviceSettings = deviceSettings(for: device.id)
+        controller.preferences = MirrorController.Preferences(
+            clipboardReceive: deviceSettings.clipboardReceive,
+            showClipboardToast: deviceSettings.showClipboardToast,
+            physicalKeyboard: deviceSettings.physicalKeyboard,
+            forwardHover: deviceSettings.forwardHover,
+            flexDisplay: package != nil && deviceSettings.isVirtualDisplayEnabled && deviceSettings.flexDisplay,
+            maxSize: Int(deviceSettings.videoResolution.trimmingCharacters(in: .whitespaces)) ?? 0
+        )
+        let deviceId = device.id
+        controller.isDeviceOnline = { [weak self] in
+            self?.paired.contains { $0.id == deviceId && $0.isConnected } ?? false
+        }
+        controller.relaunch = { [weak self, weak controller] in
+            guard let self, let controller else { return }
+            await self.startNativeMirrorAsync(package: package, appName: appName, reusing: controller)
+        }
+        controller.onFailed = { [weak self] error in
+            self?.fallbackToExternalIfEnabled(after: error, key: key, package: package, appName: appName)
+        }
+        guard let tools = nativeTools else {
+            controller.fail(.toolsMissing)
+            return
+        }
+        var env = ProcessInfo.processInfo.environment
+        if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
+        if env["PATH"] == nil { env["PATH"] = ScrcpyLaunchPlanner.defaultPath }
+        let adbURL = resolvedAdb ?? tools.adb
+        let client = AdbClient(adb: adbURL, environment: env, runner: commandRunner)
+
+        // Resolve the serial exactly like the external launch, but the native session needs one.
+        let serial: String
+        do {
+            if deviceSettings.adbTcpipModeEnabled {
+                serial = try await client.tryConnectTcp(host: device.address, model: device.model)
+            } else {
+                let devices = try await client.devices()
+                if let chosen = ScrcpyDeviceSelection.serial(devices: devices, peerModel: device.model, preference: deviceSettings.scrcpyDevicePreference) {
+                    serial = chosen
+                } else {
+                    let online = devices.filter { $0.state == "device" }
+                    guard let only = online.first else {
+                        controller.fail(.noDevice)
+                        return
+                    }
+                    serial = only.serial
+                }
+            }
+        } catch let error as AdbError {
+            controller.fail(.adb(error))
+            return
+        } catch {
+            controller.fail(.adb(.spawnFailed(error.localizedDescription)))
+            return
+        }
+
+        let built: ServerOptionsBuilder.Result
+        do {
+            built = try ServerOptionsBuilder.build(
+                settings: deviceSettings, package: package, scid: UInt32.random(in: 0...0x7fff_ffff),
+                av1Supported: VideoFormat.av1Supported, verboseLogs: general.verboseMirrorLogs
+            )
+        } catch {
+            controller.fail(.invalidOptions(error.localizedDescription))
+            return
+        }
+        built.warnings.forEach(controller.addWarning)
+        let config = MirrorSessionConfig(
+            key: key, serial: serial, options: built.options,
+            actions: ServerOptionsBuilder.startupActions(settings: deviceSettings, package: package),
+            audioTargetLatencyMs: deviceSettings.audioBuffer > 0 ? deviceSettings.audioBuffer : 50,
+            unlockCommands: deviceSettings.unlockDeviceBeforeLaunch ? deviceSettings.unlockCommands : []
+        )
+        let launcher = ServerLauncher(adb: client, serverJar: tools.server)
+        controller.start(config: config, launcher: launcher)
+    }
+
+    /// `GeneralSettings.mirrorFallbackToExternal`: a native failure before streaming opens the scrcpy window instead.
+    private func fallbackToExternalIfEnabled(after error: MirrorError, key: String, package: String?, appName: String?) {
+        guard general.mirrorFallbackToExternal, canUseExternalScrcpy else { return }
+        switch error {
+        case .cancelled, .connectionLost, .noDevice, .adb: return   // nothing external scrcpy could do better
+        default: break
+        }
+        guard let controller = mirrors[key], !controller.reconnecting else { return }
+        controller.addWarning("Native mirror failed (\(error.title)); opening external scrcpy.")
+        controller.stop()
+        launchScrcpy(package: package, appName: appName)
+    }
+
+    func stopMirror(key: String) {
+        if let controller = mirrors[key] { controller.stop() }
+        if scrcpyRunner.runningKeys.contains(key) { scrcpyRunner.terminate(key: key) }
+    }
+
+    /// Stops every session of a device: the device mirror and its per-app sessions, native or external.
+    func stopMirrors(deviceId: String) {
+        for controller in mirrors.values where controller.deviceId == deviceId { controller.stop() }
+        for key in scrcpyRunner.runningKeys where key == deviceId || key.hasPrefix(deviceId + ":") {
+            scrcpyRunner.terminate(key: key)
+        }
+    }
+
+    func stopAllMirrors() {
+        mirrors.values.forEach { $0.stop() }
+        scrcpyRunner.terminateAll()
+    }
+
+    /// True while any session of the device (device mirror or per-app) is running.
     func isMirroring(_ deviceId: String) -> Bool {
-        mirroringKeys.contains(deviceId)
+        mirroringKeys.contains { $0 == deviceId || $0.hasPrefix(deviceId + ":") }
+            || mirrors.values.contains { $0.deviceId == deviceId && $0.isActive }
     }
 
     func isMirrorPending(_ key: String) -> Bool {
         pendingMirrorKeys.contains(key)
     }
 
-    /// True when Mirror can work: bundled tools present or a custom scrcpy path set.
+    /// True when Mirror can work: native tools (or bundled/custom scrcpy for the external backend).
     var canMirror: Bool {
+        if general.mirrorBackend == .native { return nativeTools != nil }
+        return canUseExternalScrcpy
+    }
+
+    /// Bundled or custom scrcpy binary available for the external window (also the native fallback).
+    var canUseExternalScrcpy: Bool {
         if bundledTools != nil { return true }
         if !general.scrcpyPath.trimmingCharacters(in: .whitespaces).isEmpty { return true }
         guard let id = selectedDeviceID else { return false }
@@ -491,7 +672,7 @@ final class AppModel: PairingDecider {
         {
             session?.connect(deviceId: payload.deviceId, host: address, port: payload.port)
         } else if let package = url.host, !package.isEmpty {
-            launchScrcpy(package: package)
+            startMirror(package: package)
         }
     }
 
@@ -595,6 +776,10 @@ final class AppModel: PairingDecider {
         }
     }
 
+}
+
+enum MainTab: Hashable {
+    case calls, messages, apps, mirror, settings
 }
 
 struct ToolFailure: Identifiable, Equatable {

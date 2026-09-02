@@ -3,7 +3,6 @@ import SwiftUI
 
 struct MainSplitView: View {
     @Bindable var model: AppModel
-    @State private var tab: MainTab = .calls
 
     var body: some View {
         HSplitView {
@@ -14,10 +13,11 @@ struct MainSplitView: View {
             .background(.background)
 
             VStack(spacing: 0) {
-                Picker("Section", selection: $tab) {
+                Picker("Section", selection: $model.selectedTab) {
                     Text("Calls").tag(MainTab.calls)
                     Text("Messages").tag(MainTab.messages)
                     Text("Apps").tag(MainTab.apps)
+                    Text("Mirror").tag(MainTab.mirror)
                     Text("Settings").tag(MainTab.settings)
                 }
                 .pickerStyle(.segmented)
@@ -27,13 +27,15 @@ struct MainSplitView: View {
                 Divider()
 
                 Group {
-                    switch tab {
+                    switch model.selectedTab {
                     case .calls:
                         CallsView(model: model)
                     case .messages:
                         MessagesView(model: model)
                     case .apps:
                         AppsView(model: model)
+                    case .mirror:
+                        MirrorView(model: model)
                     case .settings:
                         SettingsView(model: model)
                     }
@@ -44,8 +46,4 @@ struct MainSplitView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-}
-
-private enum MainTab: Hashable {
-    case calls, messages, apps, settings
 }

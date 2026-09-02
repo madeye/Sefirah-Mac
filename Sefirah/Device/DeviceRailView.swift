@@ -37,15 +37,16 @@ struct DeviceRailView: View {
 
                 HStack {
                     if model.isMirroring(device.id) {
-                        Button("Stop") { model.stopMirroring(key: device.id) }
+                        Button("Stop") { model.stopMirrors(deviceId: device.id) }
+                            .help("Stop every mirror session of this phone")
                     } else if model.isMirrorPending(device.id) {
                         Button("Mirror") {}
                             .disabled(true)
                         ProgressView().controlSize(.small)
                     } else {
-                        Button("Mirror") { model.launchScrcpy() }
+                        Button("Mirror") { model.startMirror() }
                             .disabled(!model.canMirror)
-                            .help(model.canMirror ? "Mirror the phone screen with scrcpy" : "Bundled scrcpy is missing. Reinstall Sefirah or set a custom scrcpy path in Settings.")
+                            .help(model.canMirror ? "Mirror the phone screen" : "Bundled adb/scrcpy is missing. Reinstall Sefirah or set a custom scrcpy path in Settings.")
                     }
                     Button(model.live.soundPlaying ? "Stop sound" : "Find") {
                         model.toggleFindPhone()

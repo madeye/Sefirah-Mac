@@ -23,7 +23,7 @@ struct AppsView: View {
                     HStack {
                         Text(app.appName)
                         Spacer()
-                        Button("Launch") { model.launchScrcpy(package: app.packageName, appName: app.appName) }
+                        Button("Launch") { model.startMirror(package: app.packageName, appName: app.appName) }
                             .disabled(model.selectedDevice.map { model.isMirrorPending("\($0.id):\(app.packageName)") } ?? true)
                     }
                 }
