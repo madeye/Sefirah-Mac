@@ -30,10 +30,27 @@ populated, and a pre-build script fails the build if the vendored version drifts
 ## Screen mirroring
 
 Sefirah.app bundles [scrcpy](https://github.com/Genymobile/scrcpy) (`scrcpy`, `adb`, `scrcpy-server`)
-so **Mirror** works with no extra setup: connect the phone over USB with USB debugging enabled. Settings
-→ Screen mirroring shows the bundled version, an optional per-device "Connect over Wi-Fi (ADB TCP/IP)"
-toggle, and an Advanced section for custom scrcpy/adb paths (a custom scrcpy uses its own scrcpy-server).
+so **Mirror** works with no extra setup: connect the phone over USB with USB debugging enabled.
 Third-party notices ship in `Contents/Resources/scrcpy/NOTICES.md`.
+
+The default **native** backend mirrors inside the app's *Mirror* tab: Sefirah pushes `scrcpy-server`
+with the bundled `adb`, opens an `adb forward` tunnel, decodes H.264/H.265 with VideoToolbox, plays
+Opus/AAC/PCM audio through `AVAudioEngine` (no third-party codecs) and forwards mouse, scroll and
+keyboard input as scrcpy control messages. The *Apps* tab launches a single app on a virtual display
+(`new_display` + `START_APP`). Toolbar: Back / Home / Recents / Rotate / Screen off / Notifications /
+Mute / Volume / Power / Fullscreen; the *Mirror* menu adds ⌘⇧M start, ⌘⇧. stop, ⌘⇧U mute, ⌘⇧R rotate.
+A lost connection is retried once automatically (re-running `adb connect` for Wi-Fi devices).
+
+Settings → Screen mirroring: backend (native or the external scrcpy window), "fall back to external
+scrcpy when the native mirror fails", verbose server logs, and per device: Wi-Fi ADB, screen off,
+UHID keyboard, clipboard autosync, hover forwarding, video (codec, max size, bit rate, fps, crop,
+display id, rotation), audio (Mac / Mac+phone / phone only, Opus/AAC/raw, bit rate, buffer,
+microphone), virtual display (size, flexible resize, unlock commands) and custom `key=value` server
+options. An Advanced section takes custom scrcpy/adb paths (a custom scrcpy uses its own
+scrcpy-server). Design notes: [`docs/design/native-mirror.md`](docs/design/native-mirror.md).
+
+Some phones (Xiaomi/HyperOS) silently drop injected touches until *USB debugging (Security
+settings)* is enabled; the mirror still works read-only and the toolbar keys keep working.
 
 Release flow: archive → `xcodebuild -exportArchive -exportOptionsPlist scripts/ExportOptions.plist` →
 `scripts/verify-bundle.sh build/export/Sefirah.app` → `notarytool submit` → `stapler staple`.

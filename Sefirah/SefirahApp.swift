@@ -17,6 +17,24 @@ struct SefirahApp: App {
         .defaultSize(width: 980, height: 640)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandMenu("Mirror") {
+                Button("Start Mirroring") { model.startMirror() }
+                    .keyboardShortcut("m", modifiers: [.command, .shift])
+                    .disabled(model.selectedDevice == nil || !model.canMirror)
+                Button("Stop All Mirrors") { model.stopAllMirrors() }
+                    .keyboardShortcut(".", modifiers: [.command, .shift])
+                Divider()
+                Button(model.activeMirrorController?.isMuted == true ? "Unmute Audio" : "Mute Audio") {
+                    model.activeMirrorController?.toggleMute()
+                }
+                .keyboardShortcut("u", modifiers: [.command, .shift])
+                .disabled(model.activeMirrorController == nil)
+                Button("Rotate Device") { model.activeMirrorController?.send(.rotateDevice) }
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                    .disabled(model.activeMirrorController == nil)
+                Button("Paste Mac Clipboard to Phone") { model.activeMirrorController?.pasteFromMac() }
+                    .disabled(model.activeMirrorController == nil)
+            }
         }
 
         Window("Incoming Call", id: "call") {

@@ -241,3 +241,50 @@ public enum ScrcpyDeviceSelection {
         }
     }
 }
+
+// MARK: - Native mirror helpers (all thread `-s serial`)
+
+extension AdbClient {
+    /// `adb -s serial push local remote`
+    public func push(serial: String, local: URL, remote: String, timeout: TimeInterval = 20) async throws {
+        let result = try await runner.run(adb, ["-s", serial, "push", local.path, remote], environment: environment, timeout: timeout)
+        guard result.exitCode == 0 else {
+            throw AdbError.commandFailed(command: "-s \(serial) push", exitCode: result.exitCode, stderr: Self.trim(result.stderr + result.stdout))
+        }
+    }
+
+    /// `adb -s serial forward tcp:0 localabstract:<socketName>` → the port adb picked (first stdout line).
+    public func forward(serial: String, socketName: String) async throws -> UInt16 {
+        let result = try await runner.run(adb, ["-s", serial, "forward", "tcp:0", "localabstract:\(socketName)"], environment: environment, timeout: 5)
+        guard result.exitCode == 0, let port = AdbOutput.parseForwardPort(result.stdout) else {
+            throw AdbError.commandFailed(command: "-s \(serial) forward", exitCode: result.exitCode, stderr: Self.trim(result.stderr + result.stdout))
+        }
+        return port
+    }
+
+    /// `adb -s serial forward --remove tcp:<port>`
+    public func forwardRemove(serial: String, port: UInt16) async throws {
+        let result = try await runner.run(adb, ["-s", serial, "forward", "--remove", "tcp:\(port)"], environment: environment, timeout: 5)
+        guard result.exitCode == 0 else {
+            throw AdbError.commandFailed(command: "-s \(serial) forward --remove", exitCode: result.exitCode, stderr: Self.trim(result.stderr))
+        }
+    }
+
+    /// `adb -s serial shell <command…>`; returns the raw result (callers decide what an error is).
+    public func shell(serial: String, _ command: [String], timeout: TimeInterval = 5) async throws -> CommandResult {
+        try await runner.run(adb, ["-s", serial, "shell"] + command, environment: environment, timeout: timeout)
+    }
+
+    private static func trim(_ s: String) -> String { s.trimmingCharacters(in: .whitespacesAndNewlines) }
+}
+
+extension AdbOutput {
+    /// `adb forward tcp:0 …` prints the assigned port ("62990\n"); older adbs print nothing for explicit ports.
+    public static func parseForwardPort(_ stdout: String) -> UInt16? {
+        for line in stdout.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if let port = UInt16(trimmed), port > 0 { return port }
+        }
+        return nil
+    }
+}
